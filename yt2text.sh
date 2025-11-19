@@ -6,7 +6,7 @@
 set -e  # Exit on error
 
 # Configuration
-WHISPER_BIN="${WHISPER_BIN:-$HOME/whisper.cpp/main}"  # Path to whisper.cpp binary
+WHISPER_BIN="${WHISPER_BIN:-$HOME/whisper.cpp/build/bin/whisper-cli}"  # Path to whisper.cpp binary
 MODELS_DIR="${MODELS_DIR:-$HOME/whisper.cpp/models}"
 TRANSCRIPTS_DIR="${TRANSCRIPTS_DIR:-transcripts}"
 TEMP_DIR="${TRANSCRIPTS_DIR}/temp"
