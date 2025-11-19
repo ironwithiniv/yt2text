@@ -1,0 +1,23 @@
+# Transcripts directory
+transcripts/
+
+# Temporary files
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.opus
+
+# macOS
+.DS_Store
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
