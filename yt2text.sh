@@ -6,9 +6,13 @@
 set -e  # Exit on error
 
 # Configuration
-WHISPER_BIN="${WHISPER_BIN:-whisper}"  # Path to whisper.cpp binary
+WHISPER_BIN="${WHISPER_BIN:-$HOME/whisper.cpp/main}"  # Path to whisper.cpp binary
+MODELS_DIR="${MODELS_DIR:-$HOME/whisper.cpp/models}"
 TRANSCRIPTS_DIR="${TRANSCRIPTS_DIR:-transcripts}"
 TEMP_DIR="${TRANSCRIPTS_DIR}/temp"
+
+# Default model name
+MODEL_NAME="${2:-base.en}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -18,20 +22,21 @@ NC='\033[0m' # No Color
 
 # Function to print colored messages
 print_error() {
-    echo -e "${RED}Error: $1${NC}" >&2
+    echo -e "${RED}[ERROR] $1${NC}" >&2
 }
 
 print_success() {
-    echo -e "${GREEN}$1${NC}"
+    echo -e "${GREEN}[+] $1${NC}"
 }
 
 print_info() {
-    echo -e "${YELLOW}$1${NC}"
+    echo -e "${YELLOW}[+] $1${NC}"
 }
 
 # Check if URL is provided
 if [ -z "$1" ]; then
-    print_error "Usage: $0 <youtube-url>"
+    print_error "Usage: $0 <youtube-url> [model-name]"
+    echo "Example: $0 https://www.youtube.com/watch?v=VIDEO_ID base.en"
     exit 1
 fi
 
@@ -43,7 +48,12 @@ if ! command -v yt-dlp &> /dev/null; then
     exit 1
 fi
 
-if ! command -v "$WHISPER_BIN" &> /dev/null; then
+if ! command -v wget &> /dev/null; then
+    print_error "wget is not installed. Please install it first."
+    exit 1
+fi
+
+if [ ! -f "$WHISPER_BIN" ]; then
     print_error "whisper.cpp binary not found at '$WHISPER_BIN'. Please install whisper.cpp or set WHISPER_BIN environment variable."
     exit 1
 fi
@@ -51,39 +61,58 @@ fi
 # Create directories if they don't exist
 mkdir -p "$TRANSCRIPTS_DIR"
 mkdir -p "$TEMP_DIR"
+mkdir -p "$MODELS_DIR"
+
+# Model file path (absolute)
+MODEL_FILE="${MODELS_DIR}/ggml-${MODEL_NAME}.bin"
+
+# Check if model exists, download if not
+if [ ! -f "$MODEL_FILE" ]; then
+    print_info "Downloading model..."
+    MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${MODEL_NAME}.bin"
+    
+    if wget -q --show-progress -O "$MODEL_FILE" "$MODEL_URL"; then
+        print_success "Model downloaded successfully: ${MODEL_NAME}"
+    else
+        print_error "Failed to download model. Check your internet connection or verify the model name."
+        rm -f "$MODEL_FILE"  # Remove partial download if any
+        exit 1
+    fi
+else
+    print_info "Using existing model: ${MODEL_NAME}"
+fi
 
 print_info "Fetching video information..."
 
-# Get video title and channel name
-VIDEO_INFO=$(yt-dlp --print "%(channel)s|%(title)s" "$YOUTUBE_URL" 2>/dev/null)
+# Get video title and channel name using separate commands
+TITLE=$(yt-dlp --get-title "$YOUTUBE_URL" 2>/dev/null)
+CHANNEL=$(yt-dlp --get-uploader "$YOUTUBE_URL" 2>/dev/null)
 
-if [ $? -ne 0 ]; then
-    print_error "Failed to fetch video information. Please check the URL."
+if [ -z "$TITLE" ] || [ -z "$CHANNEL" ]; then
+    print_error "Failed to fetch video information. Check URL or yt-dlp."
     exit 1
 fi
-
-# Extract channel and title
-CHANNEL=$(echo "$VIDEO_INFO" | cut -d'|' -f1)
-TITLE=$(echo "$VIDEO_INFO" | cut -d'|' -f2-)
 
 # Sanitize filenames: remove/replace invalid characters
 sanitize_filename() {
     local filename="$1"
-    # Replace spaces with hyphens, remove special characters, limit length
-    filename=$(echo "$filename" | sed 's/[^a-zA-Z0-9._-]/ /g' | tr -s ' ' | sed 's/ /-/g')
-    # Remove leading/trailing hyphens and dots
-    filename=$(echo "$filename" | sed 's/^[.-]*//;s/[.-]*$//')
+    # Remove or replace invalid characters for filenames
+    filename=$(echo "$filename" | sed 's/[\/\\:*?"<>|]//g')
+    # Replace multiple spaces with single space
+    filename=$(echo "$filename" | tr -s ' ')
+    # Trim leading/trailing spaces
+    filename=$(echo "$filename" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     # Limit length to 200 characters
     filename=$(echo "$filename" | cut -c1-200)
     echo "$filename"
 }
 
-CHANNEL_CLEAN=$(sanitize_filename "$CHANNEL")
 TITLE_CLEAN=$(sanitize_filename "$TITLE")
+CHANNEL_CLEAN=$(sanitize_filename "$CHANNEL")
 
-# Generate output filename
-OUTPUT_FILE="${TRANSCRIPTS_DIR}/${CHANNEL_CLEAN}-${TITLE_CLEAN}.txt"
-TEMP_AUDIO="${TEMP_DIR}/${CHANNEL_CLEAN}-${TITLE_CLEAN}.wav"
+# Generate output filename: <Title> - <Channel>.txt
+OUTPUT_FILE="${TRANSCRIPTS_DIR}/${TITLE_CLEAN} - ${CHANNEL_CLEAN}.txt"
+TEMP_AUDIO="${TEMP_DIR}/${TITLE_CLEAN}-${CHANNEL_CLEAN}.wav"
 
 # Check if transcript already exists
 if [ -f "$OUTPUT_FILE" ]; then
@@ -101,10 +130,8 @@ print_info "Title: $TITLE"
 print_info "Downloading audio..."
 
 # Download audio as WAV format
-yt-dlp -x --audio-format wav -o "$TEMP_AUDIO" "$YOUTUBE_URL" --quiet --no-warnings
-
-if [ $? -ne 0 ]; then
-    print_error "Failed to download audio."
+if ! yt-dlp -x --audio-format wav -o "$TEMP_AUDIO" "$YOUTUBE_URL" --quiet --no-warnings; then
+    print_error "Audio file not downloaded. Check URL or yt-dlp."
     exit 1
 fi
 
@@ -114,20 +141,18 @@ if [ ! -f "$TEMP_AUDIO" ]; then
     TEMP_AUDIO="${TEMP_AUDIO%.*}.wav"
     if [ ! -f "$TEMP_AUDIO" ]; then
         # Try to find any audio file in temp directory
-        TEMP_AUDIO=$(find "$TEMP_DIR" -name "${CHANNEL_CLEAN}-${TITLE_CLEAN}.*" -type f | head -n 1)
-        if [ -z "$TEMP_AUDIO" ]; then
-            print_error "Could not find downloaded audio file."
+        TEMP_AUDIO=$(find "$TEMP_DIR" -name "${TITLE_CLEAN}-${CHANNEL_CLEAN}.*" -type f | head -n 1)
+        if [ -z "$TEMP_AUDIO" ] || [ ! -f "$TEMP_AUDIO" ]; then
+            print_error "Audio file not downloaded. Check URL or yt-dlp."
             exit 1
         fi
     fi
 fi
 
-print_info "Transcribing audio with Whisper.cpp (auto language detection)..."
+print_info "Transcribing..."
 
-# Run Whisper.cpp with automatic language detection
-"$WHISPER_BIN" -l auto -f "$TEMP_AUDIO" -of "${OUTPUT_FILE%.txt}" -nt
-
-if [ $? -ne 0 ]; then
+# Run Whisper.cpp with the model file
+if ! "$WHISPER_BIN" -m "$MODEL_FILE" -f "$TEMP_AUDIO" -of "${OUTPUT_FILE%.txt}" -nt; then
     print_error "Transcription failed."
     rm -f "$TEMP_AUDIO"
     exit 1
@@ -142,6 +167,4 @@ fi
 print_info "Cleaning up temporary files..."
 rm -f "$TEMP_AUDIO"
 
-print_success "Transcription complete!"
-print_success "Output saved to: $OUTPUT_FILE"
-
+print_success "Done! Transcript saved as: $OUTPUT_FILE"
